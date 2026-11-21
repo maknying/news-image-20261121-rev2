@@ -3,13 +3,14 @@
 
 A one-page newspaper drawn entirely by this program: stdlib only, no
 network, no clock, no randomness, so two runs write identical bytes.
-Reads a pre-rendered glyph atlas (atlas.bin) next to it, paints the page
-into an RGB buffer, encodes it as PNG.
+It reads a pre-rendered glyph atlas (atlas.bin) sitting next to it,
+paints the page into an RGB buffer and encodes that buffer as PNG.
 
-Layout: masthead + date, lead story (COP31 overtime) with a drawn globe,
-then 28 more stories in 7 regions, two columns, and a numbers band.
-29 stories in all, every one real and reported on 21 November 2026
-(see SOURCES.md in the work directory).
+The page: a masthead with the date, a lead story (COP31 overtime) beside
+a drawn globe, then 28 more stories grouped into 7 regions over two
+columns, and a band of numbers at the foot. 29 stories in all, every one
+real and reported on 21 November 2026 (see SOURCES.md in the work
+directory for the source of each story).
 """
 
 import math
@@ -35,8 +36,8 @@ PLAIN = 0
 
 
 # ------------------------------------------------------------------ atlas
-def load_atlas(path):
-    """Parse atlas.bin into {(bold, size): (ascent, descent, glyphs)}."""
+def read_atlas(path):
+    """Read atlas.bin into {(bold, size): (ascent, descent, glyphs)}."""
     with open(path, "rb") as handle:
         blob = handle.read()
     if blob[:7] != b"ATLAS1\n":
@@ -63,8 +64,8 @@ def load_atlas(path):
     return faces
 
 
-# ------------------------------------------------------------------ sheet
-class Sheet:
+# ----------------------------------------------------------------- canvas
+class Canvas:
     """An RGB pixel buffer with rectangle, line and circle primitives."""
 
     def __init__(self, width, height, background):
@@ -146,7 +147,7 @@ class Sheet:
 
 
 # ------------------------------------------------------------------- text
-def lookup(faces, face, char):
+def find_glyph(faces, face, char):
     _, _, glyphs = faces[face]
     found = glyphs.get(ord(char))
     if found is None:
@@ -154,30 +155,30 @@ def lookup(faces, face, char):
     return found
 
 
-def text_width(faces, face, text, tracking=0):
+def measure_text(faces, face, text, tracking=0):
     total = 0
     for char in text:
-        total += lookup(faces, face, char)[4] + tracking
+        total += find_glyph(faces, face, char)[4] + tracking
     return total - tracking if text else 0
 
 
-def line_height(faces, face):
+def row_height(faces, face):
     ascent, descent, _ = faces[face]
     return ascent + descent
 
 
-def draw_text(sheet, faces, face, x, y_top, text, colour, tracking=0):
-    """Draw text; returns the pen x after the last glyph."""
+def paint_text(page, faces, face, x, y_top, text, colour, tracking=0):
+    """Paint text; returns the pen x after the last glyph."""
     ascent, _, _ = faces[face]
     baseline = y_top + ascent
     pen = x
     for char in text:
-        xoff, yoff, gw, gh, adv, bits = lookup(faces, face, char)
+        xoff, yoff, gw, gh, adv, bits = find_glyph(faces, face, char)
         if gw and gh:
             row_bytes = (gw + 7) // 8
             for gy in range(gh):
                 yy = baseline - ascent + yoff + gy
-                if yy < 0 or yy >= sheet.height:
+                if yy < 0 or yy >= page.height:
                     continue
                 for bx in range(row_bytes):
                     byte = bits[gy * row_bytes + bx]
@@ -186,27 +187,27 @@ def draw_text(sheet, faces, face, x, y_top, text, colour, tracking=0):
                     for bit in range(8):
                         if byte & (0x80 >> bit):
                             xx = pen + xoff + bx * 8 + bit
-                            if 0 <= xx < sheet.width:
-                                at = (yy * sheet.width + xx) * 3
-                                sheet.pixels[at:at + 3] = bytes(colour)
+                            if 0 <= xx < page.width:
+                                at = (yy * page.width + xx) * 3
+                                page.pixels[at:at + 3] = bytes(colour)
         pen += adv + tracking
     return pen
 
 
-def draw_centred(sheet, faces, face, cx, y_top, text, colour, tracking=0):
-    width = text_width(faces, face, text, tracking)
-    draw_text(sheet, faces, face, cx - width // 2, y_top, text,
-              colour, tracking)
+def paint_centred(page, faces, face, cx, y_top, text, colour, tracking=0):
+    width = measure_text(faces, face, text, tracking)
+    paint_text(page, faces, face, cx - width // 2, y_top, text,
+               colour, tracking)
 
 
-def wrap(faces, face, text, max_width, tracking=0):
+def wrap_text(faces, face, text, max_width, tracking=0):
     lines = []
     for chunk in text.split("\n"):
         words = chunk.split(" ")
         current = ""
         for word in words:
             trial = word if not current else current + " " + word
-            if not current or text_width(faces, face, trial, tracking) <= max_width:
+            if not current or measure_text(faces, face, trial, tracking) <= max_width:
                 current = trial
             else:
                 lines.append(current)
@@ -215,30 +216,30 @@ def wrap(faces, face, text, max_width, tracking=0):
     return lines
 
 
-def draw_paragraph(sheet, faces, face, x, y_top, text, max_width,
-                   colour, gap=3, tracking=0):
-    step = line_height(faces, face) + gap
+def paint_paragraph(page, faces, face, x, y_top, text, max_width,
+                    colour, gap=3, tracking=0):
+    step = row_height(faces, face) + gap
     y = y_top
-    for line in wrap(faces, face, text, max_width, tracking):
-        draw_text(sheet, faces, face, x, y, line, colour, tracking)
+    for line in wrap_text(faces, face, text, max_width, tracking):
+        paint_text(page, faces, face, x, y, line, colour, tracking)
         y += step
     return y
 
 
 # -------------------------------------------------------------------- png
-def encode_png(sheet):
+def encode_png(page):
     raw = bytearray()
-    stride = sheet.width * 3
-    for yy in range(sheet.height):
+    stride = page.width * 3
+    for yy in range(page.height):
         raw.append(0)
-        raw += sheet.pixels[yy * stride:(yy + 1) * stride]
+        raw += page.pixels[yy * stride:(yy + 1) * stride]
     payload = zlib.compress(bytes(raw), 9)
 
     def chunk(kind, data):
         out = struct.pack(">I", len(data)) + kind + data
         return out + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
 
-    header = struct.pack(">IIBBBBB", sheet.width, sheet.height, 8, 2, 0, 0, 0)
+    header = struct.pack(">IIBBBBB", page.width, page.height, 8, 2, 0, 0, 0)
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
             + chunk(b"IDAT", payload) + chunk(b"IEND", b""))
 
@@ -318,97 +319,97 @@ FOOT_B = ("29 stories \u00b7 7 regions \u2014 Drawn by a program. No network, "
 
 
 # ------------------------------------------------------------------ layout
-def draw_item(sheet, faces, x, y, width, dateline, text):
+def paint_item(page, faces, x, y, width, dateline, text):
     """One story on a single line: bold dateline, regular rest."""
     head = dateline + " \u2014 "
-    after = draw_text(sheet, faces, (BOLD, 16), x, y, head, INK)
-    draw_text(sheet, faces, (PLAIN, 16), after, y, text, INK)
-    total = text_width(faces, (BOLD, 16), head) + \
-        text_width(faces, (PLAIN, 16), text)
+    after = paint_text(page, faces, (BOLD, 16), x, y, head, INK)
+    paint_text(page, faces, (PLAIN, 16), after, y, text, INK)
+    total = measure_text(faces, (BOLD, 16), head) + \
+        measure_text(faces, (PLAIN, 16), text)
     if total > width:
         raise ValueError("item too wide for column: %s %s (%d > %d)"
                          % (dateline, text, total, width))
     return y + 20
 
 
-def draw_column(sheet, faces, x, width, y, regions):
+def paint_column(page, faces, x, width, y, regions):
     for kicker, colour, items in regions:
-        draw_text(sheet, faces, (BOLD, 19), x, y, kicker, colour,
-                  tracking=1)
-        sheet.rule(x, y + 26, 52, colour, 3)
+        paint_text(page, faces, (BOLD, 19), x, y, kicker, colour,
+                   tracking=1)
+        page.rule(x, y + 26, 52, colour, 3)
         y += 32
         for dateline, text in items:
-            y = draw_item(sheet, faces, x, y, width, dateline, text)
+            y = paint_item(page, faces, x, y, width, dateline, text)
         y += 8
     return y
 
 
-def draw_globe(sheet, cx, cy, r):
-    sheet.fill_circle(cx, cy, r, BLUE)
-    sheet.circle(cx, cy, r, INK, 2)
-    sheet.circle(cx, cy, r + 7, INK, 1)
-    sheet.ellipse(cx, cy, 26, r - 4, WHITE)
-    sheet.ellipse(cx, cy, r - 4, 26, WHITE)
-    sheet.chord(cx, cy, r - 2, -30, WHITE)
-    sheet.chord(cx, cy, r - 2, 30, WHITE)
-    sheet.fill_circle(cx + 44, cy - 46, 5, RED)
+def paint_globe(page, cx, cy, r):
+    page.fill_circle(cx, cy, r, BLUE)
+    page.circle(cx, cy, r, INK, 2)
+    page.circle(cx, cy, r + 7, INK, 1)
+    page.ellipse(cx, cy, 26, r - 4, WHITE)
+    page.ellipse(cx, cy, r - 4, 26, WHITE)
+    page.chord(cx, cy, r - 2, -30, WHITE)
+    page.chord(cx, cy, r - 2, 30, WHITE)
+    page.fill_circle(cx + 44, cy - 46, 5, RED)
 
 
 def render(faces):
-    sheet = Sheet(PAGE_W, PAGE_H, PAPER)
-    sheet.frame(14, 14, PAGE_W - 28, PAGE_H - 28, INK, 2)
-    sheet.frame(20, 20, PAGE_W - 40, PAGE_H - 40, INK, 1)
+    page = Canvas(PAGE_W, PAGE_H, PAPER)
+    page.frame(14, 14, PAGE_W - 28, PAGE_H - 28, INK, 2)
+    page.frame(20, 20, PAGE_W - 40, PAGE_H - 40, INK, 1)
 
-    draw_centred(sheet, faces, (BOLD, 64), PAGE_W // 2, 32, MASTHEAD, INK)
-    draw_centred(sheet, faces, (BOLD, 22), PAGE_W // 2, 112, DATE_LINE, RED)
-    draw_centred(sheet, faces, (PLAIN, 18), PAGE_W // 2, 142, TAG_LINE,
-                 INK, tracking=3)
-    sheet.rule(36, 172, PAGE_W - 72, INK, 5)
-    sheet.rule(36, 181, PAGE_W - 72, INK, 1)
+    paint_centred(page, faces, (BOLD, 64), PAGE_W // 2, 32, MASTHEAD, INK)
+    paint_centred(page, faces, (BOLD, 22), PAGE_W // 2, 112, DATE_LINE, RED)
+    paint_centred(page, faces, (PLAIN, 18), PAGE_W // 2, 142, TAG_LINE,
+                  INK, tracking=3)
+    page.rule(36, 172, PAGE_W - 72, INK, 5)
+    page.rule(36, 181, PAGE_W - 72, INK, 1)
 
     # Lead story, left; drawn globe, right.
-    draw_text(sheet, faces, (BOLD, 19), 36, 192, LEAD_KICKER, RED,
-              tracking=1)
+    paint_text(page, faces, (BOLD, 19), 36, 192, LEAD_KICKER, RED,
+               tracking=1)
     y = 216
     for line in LEAD_LINES:
-        draw_text(sheet, faces, (BOLD, 34), 36, y, line, INK)
-        y += line_height(faces, (BOLD, 34)) + 2
+        paint_text(page, faces, (BOLD, 34), 36, y, line, INK)
+        y += row_height(faces, (BOLD, 34)) + 2
     y += 4
-    y = draw_paragraph(sheet, faces, (PLAIN, 22), 36, y, LEAD_TEXT, 664,
-                       INK, gap=3)
-    draw_globe(sheet, 852, 272, 70)
-    sheet.rule(36, 364, PAGE_W - 72, FAINT, 1)
+    y = paint_paragraph(page, faces, (PLAIN, 22), 36, y, LEAD_TEXT, 664,
+                        INK, gap=3)
+    paint_globe(page, 852, 272, 70)
+    page.rule(36, 364, PAGE_W - 72, FAINT, 1)
 
     # Region grid, two columns.
-    left_end = draw_column(sheet, faces, 36, 469, 376, REGIONS_LEFT)
-    right_end = draw_column(sheet, faces, 519, 469, 376, REGIONS_RIGHT)
+    left_end = paint_column(page, faces, 36, 469, 376, REGIONS_LEFT)
+    right_end = paint_column(page, faces, 519, 469, 376, REGIONS_RIGHT)
     grid_end = max(left_end, right_end)
-    sheet.fill(512, 378, 1, grid_end - 384, FAINT)
+    page.fill(512, 378, 1, grid_end - 384, FAINT)
 
     # Numbers band.
     band_y = grid_end + 10
     band_h = 80
-    sheet.frame(36, band_y, PAGE_W - 72, band_h, INK, 1)
+    page.frame(36, band_y, PAGE_W - 72, band_h, INK, 1)
     cell_w = (PAGE_W - 72) // 4
     for i, (big, small) in enumerate(STATS):
         cx = 36 + cell_w * i
         if i:
-            sheet.fill(cx, band_y + 8, 1, band_h - 16, FAINT)
-        draw_centred(sheet, faces, (BOLD, 34), cx + cell_w // 2,
-                     band_y + 6, big, RED)
+            page.fill(cx, band_y + 8, 1, band_h - 16, FAINT)
+        paint_centred(page, faces, (BOLD, 34), cx + cell_w // 2,
+                      band_y + 6, big, RED)
         for j, line in enumerate(small.split("\n")):
-            draw_centred(sheet, faces, (PLAIN, 16), cx + cell_w // 2,
-                         band_y + 44 + j * 18, line, INK)
+            paint_centred(page, faces, (PLAIN, 16), cx + cell_w // 2,
+                          band_y + 44 + j * 18, line, INK)
 
-    sheet.rule(36, 950, PAGE_W - 72, INK, 1)
-    draw_centred(sheet, faces, (PLAIN, 14), PAGE_W // 2, 958, FOOT_A, INK)
-    draw_centred(sheet, faces, (PLAIN, 14), PAGE_W // 2, 978, FOOT_B, INK)
-    return sheet
+    page.rule(36, 950, PAGE_W - 72, INK, 1)
+    paint_centred(page, faces, (PLAIN, 14), PAGE_W // 2, 958, FOOT_A, INK)
+    paint_centred(page, faces, (PLAIN, 14), PAGE_W // 2, 978, FOOT_B, INK)
+    return page
 
 
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
-    faces = load_atlas(os.path.join(here, "atlas.bin"))
+    faces = read_atlas(os.path.join(here, "atlas.bin"))
     data = encode_png(render(faces))
     outdir = os.environ.get("MAKEFUN_OUTPUT_DIR")
     if not outdir:
